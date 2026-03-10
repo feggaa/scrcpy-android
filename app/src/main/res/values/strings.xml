@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">Scropy</string>
+    <string name="connect_title">Connect to Android Device</string>
+    <string name="host_hint">Device IP Address (e.g. 192.168.1.5)</string>
+    <string name="port_hint">ADB Port (default 5555)</string>
+    <string name="btn_connect">Connect via WiFi</string>
+    <string name="btn_usb">Connect via USB / OTG</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="status_pushing">Pushing server…</string>
+    <string name="status_starting">Starting server…</string>
+    <string name="status_streaming">Streaming</string>
+    <string name="error_no_server">scrcpy-server not found in assets.\nBuild it first:\n  ./gradlew :server:assembleRelease</string>
+    <string name="error_connection">Connection failed: %1$s</string>
+    <string name="trust_prompt">Tap "Allow" on the target device to trust this connection.</string>
+</resources>
