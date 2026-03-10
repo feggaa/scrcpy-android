@@ -20,6 +20,14 @@ An Android-to-Android scrcpy client. Control and mirror any Android device from 
 
 ---
 
+## Upcoming Features
+
+- **App Management** — browse, install, and uninstall apps on the connected device
+- **File Manager** — explore the device file system, upload and download files
+- **Copy & Paste** — sync clipboard between devices
+
+---
+
 ## Requirements
 
 - Android 8.0 (API 26) or higher on both devices
