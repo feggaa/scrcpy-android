@@ -174,9 +174,7 @@ class StreamActivity : ComponentActivity() {
             try {
                 statusText.value = "Connecting via USB…"
                 val usbManager = getSystemService(USB_SERVICE) as UsbManager
-                val usbConnection = usbManager.openDevice(device)
-                    ?: throw java.io.IOException("Cannot open USB device")
-                adbConn = AdbConnection.connectUsb(this@StreamActivity, device, usbConnection)
+                adbConn = AdbConnection.connectUsb(this@StreamActivity, device, usbManager)
 
                 statusText.value = "Starting server…"
                 session = ScrcpySession.start(

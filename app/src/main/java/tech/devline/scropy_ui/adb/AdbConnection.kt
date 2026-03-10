@@ -2,7 +2,7 @@ package tech.devline.scropy_ui.adb
 
 import android.content.Context
 import android.hardware.usb.UsbDevice
-import android.hardware.usb.UsbDeviceConnection
+import android.hardware.usb.UsbManager
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -58,10 +58,10 @@ class AdbConnection private constructor(
         suspend fun connectUsb(
             context: Context,
             device: UsbDevice,
-            usbConnection: UsbDeviceConnection,
+            usbManager: UsbManager,
         ): AdbConnection = withContext(Dispatchers.IO) {
             val (priv, pub) = AdbAuthHelper.getOrCreateKeys(context)
-            val usbTransport = UsbAdbTransport.open(device, usbConnection)
+            val usbTransport = UsbAdbTransport.open(device, usbManager)
             AdbConnection(usbTransport, priv, pub).also {
                 // USB always requires sending CNXN first (no STLS)
                 it.sendCnxn()

@@ -5,6 +5,7 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
+import android.hardware.usb.UsbManager
 import android.hardware.usb.UsbRequest
 import android.util.Log
 import java.io.IOException
@@ -19,10 +20,12 @@ import java.util.concurrent.TimeoutException
  * No TLS — plain ADB protocol with RSA AUTH.
  */
 class UsbAdbTransport private constructor(
-    private val connection: UsbDeviceConnection,
+    private val usbManager: UsbManager,
+    private val device: UsbDevice,
+    initConnection: UsbDeviceConnection,
     private val iface: UsbInterface,
-    private val epIn: UsbEndpoint,
-    private val epOut: UsbEndpoint,
+    initEpIn: UsbEndpoint,
+    initEpOut: UsbEndpoint,
 ) : AdbTransport {
 
     companion object {
@@ -57,14 +60,16 @@ class UsbAdbTransport private constructor(
          * Find the ADB interface on [device], claim it, and return a transport.
          * @throws IOException if not an ADB device or cannot claim interface.
          */
-        fun open(device: UsbDevice, connection: UsbDeviceConnection): UsbAdbTransport {
-            // Find ADB interface
+        fun open(device: UsbDevice, usbManager: UsbManager): UsbAdbTransport {
+            val connection = usbManager.openDevice(device)
+                ?: throw IOException("Cannot open USB device: ${device.deviceName}")
             for (i in 0 until device.interfaceCount) {
                 val iface = device.getInterface(i)
                 if (isAdbInterface(iface)) {
-                    return openInterface(connection, iface)
+                    return openInterface(usbManager, device, connection, iface)
                 }
             }
+            connection.close()
             throw IOException("No ADB interface found on ${device.deviceName}")
         }
 
@@ -75,10 +80,13 @@ class UsbAdbTransport private constructor(
         }
 
         private fun openInterface(
+            usbManager: UsbManager,
+            device: UsbDevice,
             connection: UsbDeviceConnection,
             iface: UsbInterface,
         ): UsbAdbTransport {
             if (!connection.claimInterface(iface, true)) {
+                connection.close()
                 throw IOException("Failed to claim ADB interface")
             }
 
@@ -106,17 +114,42 @@ class UsbAdbTransport private constructor(
             Log.i(TAG, "ADB USB interface claimed: " +
                        "IN=0x${epIn.address.toString(16)} OUT=0x${epOut.address.toString(16)} " +
                        "maxPacket=${epIn.maxPacketSize}")
-            return UsbAdbTransport(connection, iface, epIn, epOut)
+            return UsbAdbTransport(usbManager, device, connection, iface, epIn, epOut)
         }
     }
 
+    @Volatile private var connection: UsbDeviceConnection = initConnection
+    @Volatile private var epIn: UsbEndpoint = initEpIn
+    @Volatile private var epOut: UsbEndpoint = initEpOut
     @Volatile private var closed = false
+
+    /** Full USB reconnect: close old connection, open a new one, reclaim the interface. */
+    private fun reconnect(): Boolean {
+        Log.w(TAG, "USB reconnect — closing old connection and reopening...")
+        runCatching { connection.releaseInterface(iface) }
+        runCatching { connection.close() }
+        val newConn = runCatching { usbManager.openDevice(device) }.getOrNull() ?: run {
+            Log.e(TAG, "USB reconnect failed: openDevice returned null")
+            return false
+        }
+        if (!newConn.claimInterface(iface, true)) {
+            newConn.close()
+            Log.e(TAG, "USB reconnect failed: could not claim interface")
+            return false
+        }
+        clearHalt(newConn, epIn)
+        clearHalt(newConn, epOut)
+        connection = newConn
+        Log.i(TAG, "USB reconnect successful")
+        return true
+    }
 
     override fun read(len: Int): ByteArray? {
         if (closed) return null
         val result = ByteArray(len)
         var offset = 0
-        while (offset < len) {
+        var retries = 0
+        outerLoop@ while (offset < len) {
             if (closed) return null
             val remaining = len - offset
             val buf = ByteBuffer.allocate(remaining)
@@ -141,9 +174,18 @@ class UsbAdbTransport private constructor(
                         val completed = connection.requestWait(TIMEOUT_MS.toLong())
                         if (completed == null) {
                             if (closed) return null
-                            Log.e(TAG, "requestWait returned null")
+                            // requestWait returned null — fully reconnect the USB device
+                            // (release interface, open new connection, reclaim) then retry
+                            if (retries++ < 3) {
+                                Log.w(TAG, "requestWait returned null, retry $retries — full USB reconnect")
+                                req.cancel()
+                                if (!reconnect()) return null
+                                continue@outerLoop  // finally closes req, then retries
+                            }
+                            Log.e(TAG, "requestWait returned null after $retries retries")
                             return null
                         }
+                        retries = 0
                         break // success
                     } catch (_: TimeoutException) {
                         // Timeout waiting for data — keep waiting unless closed
@@ -185,7 +227,7 @@ class UsbAdbTransport private constructor(
             }
             offset += n
         }
-        Log.d(TAG, "USB write OK: ${data.size} bytes")
+        //Log.d(TAG, "USB write OK: ${data.size} bytes")
         // Send ZLP if payload is exact multiple of max packet size
         if (data.isNotEmpty() && data.size % epOut.maxPacketSize == 0) {
             connection.bulkTransfer(epOut, ByteArray(0), 0, 0, TIMEOUT_MS)
