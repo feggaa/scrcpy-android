@@ -7,6 +7,12 @@ An Android-to-Android scrcpy client. Control and mirror any Android device from 
 
 ---
 
+## Demo
+
+[![Watch on YouTube](https://img.youtube.com/vi/UrtwvAFH8G4/maxresdefault.jpg)](https://www.youtube.com/watch?v=UrtwvAFH8G4)
+
+---
+
 ## Features
 
 - **ADB over WiFi** — connect wirelessly using Android's Wireless Debugging (pairing code or direct IP)
