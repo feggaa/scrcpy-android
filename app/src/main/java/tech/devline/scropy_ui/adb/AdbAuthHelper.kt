@@ -99,7 +99,7 @@ object AdbAuthHelper {
         val n0inv = computeN0Inv(n[0].toLong() and 0xFFFFFFFFL).toInt()
 
         // rr[] = R^2 mod N  where R = 2^2048
-        val bigRR   = BigInteger.TWO.pow(KEY_BITS * 2).mod(bigN)
+        val bigRR   = BigInteger.valueOf(2).pow(KEY_BITS * 2).mod(bigN)
         val rrBytes = bigRR.toFixedBytes(MOD_BYTES)
         val rr = IntArray(MOD_WORDS) { i ->
             val base = MOD_BYTES - 4 - i * 4
@@ -129,7 +129,7 @@ object AdbAuthHelper {
     /** n0inv = -(n^(-1) mod 2^32). Uses BigInteger for correctness. */
     private fun computeN0Inv(n: Long): Long {
         val nBig  = BigInteger.valueOf(n)
-        val mod   = BigInteger.TWO.pow(32)
+        val mod   = BigInteger.valueOf(2).pow(32)
         val nInv  = nBig.modInverse(mod)               // n^-1 mod 2^32
         return mod.subtract(nInv).toLong() and 0xFFFFFFFFL
     }

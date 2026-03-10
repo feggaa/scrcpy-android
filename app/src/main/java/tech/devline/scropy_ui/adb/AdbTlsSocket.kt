@@ -17,7 +17,12 @@ import java.io.IOException
 object AdbTlsSocket {
 
     init {
-        System.loadLibrary("adb_pairing")
+        try {
+            System.loadLibrary("adb_pairing")
+        } catch (e: UnsatisfiedLinkError) {
+            tech.devline.scropy_ui.App.writeDiag("AdbTlsSocket: loadLibrary FAILED: $e")
+            throw e
+        }
     }
 
     /**

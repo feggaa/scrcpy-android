@@ -160,6 +160,7 @@ class StreamActivity : ComponentActivity() {
                 }
 
             } catch (e: Exception) {
+                android.util.Log.e("StreamActivity", "TCP connection failed", e)
                 errorText.value   = e.message ?: "Unknown error"
                 statusText.value  = "Failed"
                 isConnected.value = false
@@ -216,6 +217,7 @@ class StreamActivity : ComponentActivity() {
                 }
 
             } catch (e: Exception) {
+                android.util.Log.e("StreamActivity", "USB connection failed", e)
                 errorText.value   = e.message ?: "USB connection error"
                 statusText.value  = "Failed"
                 isConnected.value = false

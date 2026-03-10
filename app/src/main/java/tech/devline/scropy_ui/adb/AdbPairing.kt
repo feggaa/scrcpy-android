@@ -19,7 +19,12 @@ object AdbPairing {
     private const val TAG = "AdbPairing"
 
     init {
-        System.loadLibrary("adb_pairing")
+        try {
+            System.loadLibrary("adb_pairing")
+        } catch (e: UnsatisfiedLinkError) {
+            tech.devline.scropy_ui.App.writeDiag("AdbPairing: loadLibrary FAILED: $e")
+            throw e
+        }
     }
 
     /**

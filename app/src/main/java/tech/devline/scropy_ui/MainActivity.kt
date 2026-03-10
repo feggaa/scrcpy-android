@@ -47,6 +47,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val ACTION_USB_PERMISSION = "tech.devline.scropy_ui.USB_PERMISSION"
+        private const val TAG = "MainActivity"
     }
 
     // USB permission callback - set by the USB tab when requesting permission
@@ -64,6 +65,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        App.writeDiag("MainActivity.onCreate: started")
         enableEdgeToEdge()
 
         val filter = IntentFilter(ACTION_USB_PERMISSION)
@@ -90,7 +92,10 @@ class MainActivity : ComponentActivity() {
                                         }
                                     )
                                 },
-                                onFailure = { onResult(it.message ?: "ADB connect failed") },
+                                onFailure = { e ->
+                                    android.util.Log.e(TAG, "TCP connect failed", e)
+                                    onResult(e.message ?: "ADB connect failed")
+                                },
                             )
                         }
                     },
@@ -121,7 +126,10 @@ class MainActivity : ComponentActivity() {
                                         }
                                     )
                                 },
-                                onFailure = { onResult(it.message ?: "Pairing failed", null) },
+                                onFailure = { e ->
+                                    android.util.Log.e(TAG, "Pairing failed", e)
+                                    onResult(e.message ?: "Pairing failed", null)
+                                },
                             )
                         }
                     },
