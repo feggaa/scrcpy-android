@@ -52,9 +52,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.ClickableText
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -423,6 +427,7 @@ fun DeviceListScreen(
     var connectingId by remember { mutableStateOf<String?>(null) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
     var pendingConn by remember { mutableStateOf<AdbConnection?>(null) }
+    var showInfoDialog by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -432,9 +437,10 @@ fun DeviceListScreen(
             )
         }
     ) { padding ->
+        Box(modifier = Modifier.padding(padding).fillMaxSize()) {
         if (devices.isEmpty()) {
             Box(
-                modifier = Modifier.padding(padding).fillMaxSize(),
+                modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center,
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -449,8 +455,8 @@ fun DeviceListScreen(
             }
         } else {
             LazyColumn(
-                modifier = Modifier.padding(padding).fillMaxSize(),
-                contentPadding = PaddingValues(16.dp),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 60.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(devices, key = { it.id }) { device ->
@@ -596,6 +602,57 @@ fun DeviceListScreen(
                     }
                 }
             }
+        }
+
+        TextButton(
+            onClick = { showInfoDialog = true },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 4.dp),
+        ) {
+            Text(
+                "About",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        } // end outer Box
+
+        if (showInfoDialog) {
+            val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+            val linkColor = MaterialTheme.colorScheme.primary
+            val bodyColor = MaterialTheme.colorScheme.onSurface
+            val annotated = buildAnnotatedString {
+                withStyle(SpanStyle(color = bodyColor)) { append("Developed by ") }
+                pushStringAnnotation(tag = "URL", annotation = "https://github.com/feggaa")
+                withStyle(SpanStyle(color = linkColor)) { append("Rabi3") }
+                pop()
+                withStyle(SpanStyle(color = bodyColor)) {
+                    append("\n\nThis is an Android client based on the open-source desktop scrcpy project, " +
+                        "reimagined for Android-to-Android usage.\n\n" +
+                        "This app is intended for development and testing purposes only. " +
+                        "You must own or have explicit authorization to access any device you connect to. " +
+                        "Unauthorized access to devices may violate laws. " +
+                        "The developer assumes no liability for misuse.")
+                }
+            }
+            AlertDialog(
+                onDismissRequest = { showInfoDialog = false },
+                title = { Text("About Scropy Android") },
+                text = {
+                    ClickableText(
+                        text = annotated,
+                        style = MaterialTheme.typography.bodyMedium,
+                        onClick = { offset ->
+                            annotated.getStringAnnotations("URL", offset, offset)
+                                .firstOrNull()?.let { uriHandler.openUri(it.item) }
+                        },
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { showInfoDialog = false }) { Text("OK") }
+                },
+            )
         }
     }
 }
