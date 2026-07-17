@@ -25,6 +25,7 @@ tasks.named("preBuild") { dependsOn("copyScrcpyServer") }
 android {
     namespace = "tech.devline.scropy_ui"
     compileSdk = 36
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         applicationId = "tech.devline.scropy_ui"
@@ -48,10 +49,15 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = rootProject.file(keystoreProps.getProperty("storeFile", ""))
-            storePassword = keystoreProps.getProperty("storePassword")
-            keyAlias = keystoreProps.getProperty("keyAlias")
-            keyPassword = keystoreProps.getProperty("keyPassword")
+            // Only wire up release signing when keystore.properties is present,
+            // otherwise rootProject.file("") throws and even debug builds fail.
+            val storeFilePath = keystoreProps.getProperty("storeFile", "")
+            if (storeFilePath.isNotEmpty()) {
+                storeFile = rootProject.file(storeFilePath)
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
         }
     }
     buildTypes {
