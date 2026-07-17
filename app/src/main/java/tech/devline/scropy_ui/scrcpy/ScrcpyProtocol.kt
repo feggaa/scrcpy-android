@@ -18,8 +18,11 @@ object ScrcpyProtocol {
     const val CODEC_RAW  = 0x00726177
 
     // ── Frame packet flags (in the 8-byte pts header) ───────────────────────
-    const val FLAG_CONFIG    = 1L shl 63
-    const val FLAG_KEY_FRAME = 1L shl 62
+    // scrcpy 4.x layout: bit 63 = session-meta packet (video only, carries
+    // width/height and has no payload), bit 62 = config, bit 61 = key frame.
+    const val FLAG_SESSION   = 1L shl 63
+    const val FLAG_CONFIG    = 1L shl 62
+    const val FLAG_KEY_FRAME = 1L shl 61
     const val PTS_MASK       = FLAG_KEY_FRAME - 1L
 
     // ── Packet header size (pts:8 + size:4) ─────────────────────────────────
@@ -108,6 +111,15 @@ object ScrcpyProtocol {
 
     /** Simple no-payload messages (back, expand/collapse panels, rotate, etc.). */
     fun buildEmpty(type: Int): ByteArray = byteArrayOf(type.toByte())
+
+    /**
+     * Turn the remote device's physical display on/off while mirroring
+     * (SET_DISPLAY_POWER). Wire format: type(1) + on(1). Sending `false` once
+     * makes the server keep the screen off until the session ends — mirroring
+     * and control continue normally, saving the target's screen/battery.
+     */
+    fun buildDisplayPower(on: Boolean): ByteArray =
+        byteArrayOf(TYPE_SET_DISPLAY_POWER.toByte(), if (on) 1 else 0)
 
     // ─────────────────────────────────────────────────────────────────────────
 
