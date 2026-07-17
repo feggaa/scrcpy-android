@@ -33,9 +33,11 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import tech.devline.scropy_ui.adb.AdbAuthHelper
@@ -129,6 +131,10 @@ private fun upsertDevice(prefs: android.content.SharedPreferences, device: Saved
 
 private fun deleteDevice(prefs: android.content.SharedPreferences, id: String) =
     persistDevices(prefs, loadDevices(prefs).filter { it.id != id })
+
+/** Replace a saved device by id (used for editing and for live-port updates). */
+private fun updateDeviceById(prefs: android.content.SharedPreferences, updated: SavedDevice) =
+    persistDevices(prefs, loadDevices(prefs).map { if (it.id == updated.id) updated else it })
 
 // --- Network scan ------------------------------------------------------------
 
@@ -245,6 +251,33 @@ fun discoverAdbViaBonjour(
         override fun onServiceLost(svc: android.net.nsd.NsdServiceInfo) {}
     }.also { listener ->
         nsd.discoverServices("_adb-tls-connect._tcp", android.net.nsd.NsdManager.PROTOCOL_DNS_SD, listener)
+    }
+}
+
+/**
+ * Resolve the *current* wireless-debugging port for [host] via mDNS.
+ *
+ * Android randomises the wireless-debugging connect port (it changes on lock/unlock,
+ * toggling debugging, or reboot), but the device keeps advertising its live port over
+ * mDNS. This finds the current port for a device whose IP we already know, so a saved
+ * connection keeps working without re-pairing. Falls back to [fallbackPort] if mDNS
+ * turns up nothing within [timeoutMs] (e.g. device asleep, or not on Wi-Fi).
+ */
+suspend fun resolveAdbPortViaMdns(
+    context: android.content.Context,
+    host: String,
+    fallbackPort: Int,
+    timeoutMs: Long = 3000,
+): Int {
+    val nsd = context.getSystemService(android.content.Context.NSD_SERVICE) as android.net.nsd.NsdManager
+    val result = CompletableDeferred<Int>()
+    val listener = discoverAdbViaBonjour(context) { d ->
+        if (d.host == host && !result.isCompleted) result.complete(d.port)
+    }
+    return try {
+        withTimeoutOrNull(timeoutMs) { result.await() } ?: fallbackPort
+    } finally {
+        runCatching { nsd.stopServiceDiscovery(listener) }
     }
 }
 
@@ -428,6 +461,7 @@ fun DeviceListScreen(
     var errorMsg by remember { mutableStateOf<String?>(null) }
     var pendingConn by remember { mutableStateOf<AdbConnection?>(null) }
     var showInfoDialog by remember { mutableStateOf(false) }
+    var editingDevice by remember { mutableStateOf<SavedDevice?>(null) }
 
     Scaffold(
         topBar = {
@@ -511,11 +545,17 @@ fun DeviceListScreen(
                                             )
                                         }
                                         Text(
-                                            "${device.host}:${device.port}",
+                                            // Port is auto-resolved on connect and changes constantly,
+                                            // so show just the IP (the stable, useful part).
+                                            device.host,
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
                                     }
+                                    TextButton(
+                                        onClick = { editingDevice = device },
+                                        enabled = connectingId == null,
+                                    ) { Text("Edit") }
                                     TextButton(
                                         onClick = { deleteDevice(prefs, device.id); devices = loadDevices(prefs) },
                                         enabled = connectingId == null,
@@ -535,9 +575,15 @@ fun DeviceListScreen(
                                                 if (connectingId != null) return@OutlinedButton
                                                 connectingId = device.id; errorMsg = null
                                                 scope.launch {
+                                                    // Wireless-debugging port drifts on lock/unlock — find the live one.
+                                                    val livePort = resolveAdbPortViaMdns(ctx, device.host, device.port)
+                                                    if (livePort != device.port) {
+                                                        updateDeviceById(prefs, device.copy(port = livePort))
+                                                        devices = loadDevices(prefs)
+                                                    }
                                                     runCatching {
                                                         withContext(Dispatchers.IO) {
-                                                            AdbConnection.connectTcp(ctx as ComponentActivity, device.host, device.port)
+                                                            AdbConnection.connectTcp(ctx as ComponentActivity, device.host, livePort)
                                                         }
                                                     }.fold(
                                                         onSuccess = { conn ->
@@ -545,12 +591,12 @@ fun DeviceListScreen(
                                                             scope.launch {
                                                                 val (_, _, screenshot) = fetchDeviceMetadata(conn, ctx, device.id)
                                                                 if (screenshot != null) {
-                                                                    upsertDevice(prefs, device.copy(screenshotPath = screenshot))
+                                                                    updateDeviceById(prefs, device.copy(port = livePort, screenshotPath = screenshot))
                                                                     devices = loadDevices(prefs)
                                                                 }
                                                                 conn.close()
                                                             }
-                                                            connectingId = null; onLaunchStream(device.host, device.port)
+                                                            connectingId = null; onLaunchStream(device.host, livePort)
                                                         },
                                                         onFailure = { connectingId = null; errorMsg = it.message ?: "Connection failed" },
                                                     )
@@ -563,9 +609,14 @@ fun DeviceListScreen(
                                                 if (connectingId != null) return@OutlinedButton
                                                 connectingId = device.id; errorMsg = null
                                                 scope.launch {
+                                                    val livePort = resolveAdbPortViaMdns(ctx, device.host, device.port)
+                                                    if (livePort != device.port) {
+                                                        updateDeviceById(prefs, device.copy(port = livePort))
+                                                        devices = loadDevices(prefs)
+                                                    }
                                                     runCatching {
                                                         withContext(Dispatchers.IO) {
-                                                            AdbConnection.connectTcp(ctx as ComponentActivity, device.host, device.port)
+                                                            AdbConnection.connectTcp(ctx as ComponentActivity, device.host, livePort)
                                                         }
                                                     }.fold(
                                                         onSuccess = { conn ->
@@ -573,7 +624,7 @@ fun DeviceListScreen(
                                                             scope.launch {
                                                                 val (_, _, screenshot) = fetchDeviceMetadata(conn, ctx, device.id)
                                                                 if (screenshot != null) {
-                                                                    upsertDevice(prefs, device.copy(screenshotPath = screenshot))
+                                                                    updateDeviceById(prefs, device.copy(port = livePort, screenshotPath = screenshot))
                                                                     devices = loadDevices(prefs)
                                                                 }
                                                             }
@@ -617,6 +668,56 @@ fun DeviceListScreen(
             )
         }
         } // end outer Box
+
+        editingDevice?.let { dev ->
+            var nameField by remember(dev.id) { mutableStateOf(dev.name) }
+            var hostField by remember(dev.id) { mutableStateOf(dev.host) }
+            var portField by remember(dev.id) { mutableStateOf(dev.port.toString()) }
+            AlertDialog(
+                onDismissRequest = { editingDevice = null },
+                title = { Text("Edit connection") },
+                text = {
+                    Column {
+                        OutlinedTextField(
+                            value = nameField, onValueChange = { nameField = it },
+                            label = { Text("Name") }, singleLine = true,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = hostField, onValueChange = { hostField = it },
+                            label = { Text("IP address") }, singleLine = true,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = portField,
+                            onValueChange = { v -> portField = v.filter { it.isDigit() } },
+                            label = { Text("Port") }, singleLine = true,
+                        )
+                        Text(
+                            "Tip: the port updates itself automatically on connect, so you rarely need to set it here.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val p = portField.toIntOrNull() ?: dev.port
+                        updateDeviceById(prefs, dev.copy(
+                            name = nameField.trim().ifEmpty { dev.name },
+                            host = hostField.trim().ifEmpty { dev.host },
+                            port = p,
+                        ))
+                        devices = loadDevices(prefs)
+                        editingDevice = null
+                    }) { Text("Save") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { editingDevice = null }) { Text("Cancel") }
+                },
+            )
+        }
 
         if (showInfoDialog) {
             val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
@@ -795,7 +896,64 @@ fun WifiConnectScreen(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { focus.clearFocus() }),
             )
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = {
+                    focus.clearFocus()
+                    val port = adbPortStr.toIntOrNull() ?: return@Button
+                    if (host.isBlank()) return@Button
+                    runCatching { pendingConn?.close() }; pendingConn = null
+                    connecting = true; status = "Connecting..."; showPair = true
+                    prefs.edit().putString("last_host", host.trim()).putString("last_adb_port", adbPortStr).apply()
+                    scope.launch {
+                        // The wireless-debugging port drifts, so a typed/pre-filled one goes
+                        // stale — prefer the live port and correct the field if it moved.
+                        val livePort = resolveAdbPortViaMdns(ctx, host.trim(), port)
+                        if (livePort != port) adbPortStr = livePort.toString()
+                        runCatching {
+                            withContext(Dispatchers.IO) {
+                                AdbConnection.connectTcp(ctx as ComponentActivity, host.trim(), livePort)
+                            }
+                        }.fold(
+                            onSuccess = { conn ->
+                                pendingConn = conn
+                                connecting = false; status = "Getting device info..."
+                                val deviceId = UUID.randomUUID().toString()
+                                val baseDevice = SavedDevice(deviceId, host.trim(), host.trim(), livePort)
+                                upsertDevice(prefs, baseDevice)
+                                val (model, ver, screenshot) = fetchDeviceMetadata(conn, ctx, deviceId)
+                                upsertDevice(prefs, baseDevice.copy(
+                                    name = model ?: host.trim(),
+                                    model = model,
+                                    androidVersion = ver,
+                                    screenshotPath = screenshot,
+                                ))
+                                status = null
+                                pendingConn = null
+                                when (action) {
+                                    AppAction.STREAM -> { conn.close(); onLaunchStream(host.trim(), livePort) }
+                                    AppAction.SHELL  -> onOpenShell(conn, model ?: host.trim())
+                                }
+                            },
+                            onFailure = { e -> connecting = false; status = "X ${e.message}"; showPair = true },
+                        )
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !connecting && !pairing && host.isNotBlank() && adbPortStr.isNotBlank(),
+            ) {
+                if (connecting) { CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp); Spacer(Modifier.width(8.dp)) }
+                Text(if (connecting) "Connecting..." else "Connect")
+            }
+            status?.let { msg ->
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    msg,
+                    color = if (msg.startsWith("X")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Spacer(Modifier.height(20.dp))
 
             // ── Network scan ────────────────────────────────────────────
             OutlinedButton(
@@ -858,10 +1016,11 @@ fun WifiConnectScreen(
                 discoveredDevices.forEach { device ->
                     ElevatedCard(
                         onClick = {
+                            // Fill the fields from the tapped device, but keep the list
+                            // visible (clearing it here made devices seem to "disappear").
                             host = device.host
                             adbPortStr = device.port.toString()
                             portScanHost = null; portScanResults = emptyList(); portScanDone = false
-                            scanResults = emptyList(); discoveredDevices.clear()
                         },
                         modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
                     ) {
@@ -953,60 +1112,8 @@ fun WifiConnectScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Spacer(Modifier.height(12.dp))
-            Button(
-                onClick = {
-                    focus.clearFocus()
-                    val port = adbPortStr.toIntOrNull() ?: return@Button
-                    if (host.isBlank()) return@Button
-                    runCatching { pendingConn?.close() }; pendingConn = null
-                    connecting = true; status = "Connecting..."; showPair = true
-                    prefs.edit().putString("last_host", host.trim()).putString("last_adb_port", adbPortStr).apply()
-                    scope.launch {
-                        runCatching {
-                            withContext(Dispatchers.IO) {
-                                AdbConnection.connectTcp(ctx as ComponentActivity, host.trim(), port)
-                            }
-                        }.fold(
-                            onSuccess = { conn ->
-                                pendingConn = conn
-                                connecting = false; status = "Getting device info..."
-                                val deviceId = UUID.randomUUID().toString()
-                                val baseDevice = SavedDevice(deviceId, host.trim(), host.trim(), port)
-                                upsertDevice(prefs, baseDevice)
-                                val (model, ver, screenshot) = fetchDeviceMetadata(conn, ctx, deviceId)
-                                upsertDevice(prefs, baseDevice.copy(
-                                    name = model ?: host.trim(),
-                                    model = model,
-                                    androidVersion = ver,
-                                    screenshotPath = screenshot,
-                                ))
-                                status = null
-                                pendingConn = null
-                                when (action) {
-                                    AppAction.STREAM -> { conn.close(); onLaunchStream(host.trim(), port) }
-                                    AppAction.SHELL  -> onOpenShell(conn, model ?: host.trim())
-                                }
-                            },
-                            onFailure = { e -> connecting = false; status = "X ${e.message}"; showPair = true },
-                        )
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = !connecting && !pairing && host.isNotBlank() && adbPortStr.isNotBlank(),
-            ) {
-                if (connecting) { CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp); Spacer(Modifier.width(8.dp)) }
-                Text(if (connecting) "Connecting..." else "Connect")
-            }
-            status?.let { msg ->
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    msg,
-                    color = if (msg.startsWith("X")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            if (showPair) {
+            // Pairing is meaningless until a target IP is chosen/entered.
+            if (showPair && host.isNotBlank()) {
                 Spacer(Modifier.height(20.dp))
                 HorizontalDivider()
                 Spacer(Modifier.height(12.dp))
@@ -1038,7 +1145,6 @@ fun WifiConnectScreen(
                     onClick = {
                         focus.clearFocus()
                         val pairPort = pairPortStr.toIntOrNull() ?: return@Button
-                        val adbPort  = adbPortStr.toIntOrNull()  ?: return@Button
                         if (host.isBlank() || pairCode.length != 6) return@Button
                         runCatching { pendingConn?.close() }; pendingConn = null
                         pairing = true; status = "Pairing..."
@@ -1046,40 +1152,52 @@ fun WifiConnectScreen(
                             val (priv, pub) = AdbAuthHelper.getOrCreateKeys(ctx as ComponentActivity)
                             runCatching { AdbPairing.pair(host.trim(), pairPort, pairCode, priv, pub) }.fold(
                                 onSuccess = {
-                                    status = "Paired! Connecting..."
+                                    // The connect port is NOT the pairing port, and it drifts —
+                                    // find the live one rather than trusting whatever is typed.
+                                    status = "Paired! Finding device…"
                                     kotlinx.coroutines.delay(2000)
-                                    runCatching {
-                                        withContext(Dispatchers.IO) { AdbConnection.connectTcp(ctx, host.trim(), adbPort) }
-                                    }.fold(
-                                        onSuccess = { conn ->
-                                            pendingConn = conn
-                                            pairing = false; status = "Getting device info..."
-                                            val deviceId = UUID.randomUUID().toString()
-                                            val baseDevice = SavedDevice(deviceId, host.trim(), host.trim(), adbPort)
-                                            upsertDevice(prefs, baseDevice)
-                                            val (model, ver, screenshot) = fetchDeviceMetadata(conn, ctx, deviceId)
-                                            upsertDevice(prefs, baseDevice.copy(
-                                                name = model ?: host.trim(),
-                                                model = model,
-                                                androidVersion = ver,
-                                                screenshotPath = screenshot,
-                                            ))
-                                            status = null; showPair = true
-                                            pendingConn = null
-                                            when (action) {
-                                                AppAction.STREAM -> { conn.close(); onLaunchStream(host.trim(), adbPort) }
-                                                AppAction.SHELL  -> onOpenShell(conn, model ?: host.trim())
-                                            }
-                                        },
-                                        onFailure = { e -> pairing = false; status = "Paired OK, but connect failed: ${e.message}" },
-                                    )
+                                    val adbPort = resolveAdbPortViaMdns(ctx, host.trim(), adbPortStr.toIntOrNull() ?: 0)
+                                    if (adbPort <= 0) {
+                                        pairing = false
+                                        status = "X Paired OK, but couldn't find the connect port. " +
+                                            "Check Wireless debugging is still on, then tap \"Discover & scan network\"."
+                                    } else {
+                                        adbPortStr = adbPort.toString()
+                                        status = "Paired! Connecting..."
+                                        runCatching {
+                                            withContext(Dispatchers.IO) { AdbConnection.connectTcp(ctx, host.trim(), adbPort) }
+                                        }.fold(
+                                            onSuccess = { conn ->
+                                                pendingConn = conn
+                                                pairing = false; status = "Getting device info..."
+                                                val deviceId = UUID.randomUUID().toString()
+                                                val baseDevice = SavedDevice(deviceId, host.trim(), host.trim(), adbPort)
+                                                upsertDevice(prefs, baseDevice)
+                                                val (model, ver, screenshot) = fetchDeviceMetadata(conn, ctx, deviceId)
+                                                upsertDevice(prefs, baseDevice.copy(
+                                                    name = model ?: host.trim(),
+                                                    model = model,
+                                                    androidVersion = ver,
+                                                    screenshotPath = screenshot,
+                                                ))
+                                                status = null; showPair = true
+                                                pendingConn = null
+                                                when (action) {
+                                                    AppAction.STREAM -> { conn.close(); onLaunchStream(host.trim(), adbPort) }
+                                                    AppAction.SHELL  -> onOpenShell(conn, model ?: host.trim())
+                                                }
+                                            },
+                                            onFailure = { e -> pairing = false; status = "Paired OK, but connect failed: ${e.message}" },
+                                        )
+                                    }
                                 },
                                 onFailure = { e -> pairing = false; status = "X Pairing failed: ${e.message}" },
                             )
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = !pairing && !connecting && pairPortStr.isNotBlank() && pairCode.length == 6,
+                    enabled = !pairing && !connecting && host.isNotBlank() &&
+                        pairPortStr.isNotBlank() && pairCode.length == 6,
                 ) {
                     if (pairing) { CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp); Spacer(Modifier.width(8.dp)) }
                     Text(if (pairing) "Pairing..." else "Pair & Connect")

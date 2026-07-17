@@ -20,13 +20,16 @@ private const val TAG = "VideoDecoder"
  * The raw stream format (after the session handshake) is:
  *   [pts_flags: int64 BE] [size: int32 BE] [data: <size> bytes]   (repeated)
  *
- * Bit 63 of pts_flags = CONFIG packet, bit 62 = KEY_FRAME.
+ * scrcpy 4.x: bit 63 = session-meta packet (12-byte header only, carries
+ * width/height, no payload — emitted again on rotation/resize), bit 62 = CONFIG,
+ * bit 61 = KEY_FRAME. [onResize] is invoked when a session packet updates the size.
  */
 class VideoDecoder(
     private val stream: AdbStream,
     private val codecId: Int,
     private val width: Int,
     private val height: Int,
+    private val onResize: ((Int, Int) -> Unit)? = null,
 ) {
     @Volatile var isRunning = false
         private set
@@ -66,6 +69,16 @@ class VideoDecoder(
             while (isRunning && !stream.isClosed()) {
                 val ptsFlags = dis.readLong()
                 val dataSize = dis.readInt()
+
+                // scrcpy 4.x session-meta packet: MSB set, no payload. The low 32
+                // bits of the header hold the width, the "size" field the height.
+                if ((ptsFlags and ScrcpyProtocol.FLAG_SESSION) != 0L) {
+                    val newW = (ptsFlags and 0xFFFFFFFFL).toInt()
+                    val newH = dataSize
+                    Log.d(TAG, "Session meta: ${newW}x${newH}")
+                    if (newW > 0 && newH > 0) onResize?.invoke(newW, newH)
+                    continue
+                }
 
                 if (dataSize <= 0 || dataSize > 4 * 1024 * 1024) {
                     Log.w(TAG, "Invalid packet size $dataSize, skipping")

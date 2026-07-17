@@ -71,6 +71,9 @@ class ControlSender(private val stream: AdbStream) {
     fun sendRotateDevice()            = send(ScrcpyProtocol.buildEmpty(ScrcpyProtocol.TYPE_ROTATE_DEVICE))
     fun sendResetVideo()              = send(ScrcpyProtocol.buildEmpty(ScrcpyProtocol.TYPE_RESET_VIDEO))
 
+    /** Turn the remote device's screen on/off while keeping the session live. */
+    fun sendDisplayPower(on: Boolean) = send(ScrcpyProtocol.buildDisplayPower(on))
+
     // ─── Private ─────────────────────────────────────────────────────────────
 
     private fun send(data: ByteArray) {

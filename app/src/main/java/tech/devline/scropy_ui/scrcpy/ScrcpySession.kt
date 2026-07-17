@@ -42,19 +42,23 @@ class ScrcpySession private constructor(
 
         private const val DEVICE_SERVER_PATH = "/data/local/tmp/scrcpy-server.jar"
         private const val SERVER_ASSET       = "scrcpy-server"
-        private const val SCRCPY_VERSION     = "3.3.4"
+        private const val SCRCPY_VERSION     = "4.1"
 
         /**
          * Connect to a running [adb] session and start a scrcpy session.
          *
-         * @param enableAudio  Request audio forwarding (Android 11+).
-         * @param maxSize      0 = no limit; otherwise long-edge pixel cap.
+         * @param enableAudio   Request audio forwarding (Android 11+).
+         * @param maxSize       0 = no limit; otherwise long-edge pixel cap.
+         * @param maxFps        0 = server default; otherwise cap frame rate (battery saver).
+         * @param videoBitRate  0 = server default (~8 Mbps); otherwise bits/sec.
          */
         suspend fun start(
             context: Context,
             adb: AdbConnection,
             enableAudio: Boolean = true,
             maxSize: Int = 0,
+            maxFps: Int = 0,
+            videoBitRate: Int = 0,
         ): ScrcpySession = withContext(Dispatchers.IO) {
 
             // ── 1. Push server JAR (skip if already up-to-date) ────────────
@@ -90,6 +94,8 @@ class ScrcpySession private constructor(
             )
             if (!enableAudio) cmdParts += "audio=false"
             if (maxSize > 0) cmdParts += "max_size=$maxSize"
+            if (maxFps > 0) cmdParts += "max_fps=$maxFps"
+            if (videoBitRate > 0) cmdParts += "video_bit_rate=$videoBitRate"
 
             val shellCmd = "shell:" + cmdParts.joinToString(" ")
             Log.d(TAG, "Starting server: $shellCmd")
@@ -142,10 +148,16 @@ class ScrcpySession private constructor(
             dis.readFully(nameBytes)
             val deviceName = String(nameBytes, Charsets.UTF_8).trimEnd('\u0000')
 
-            // Video codec meta: codec_id(4) + width(4) + height(4) big-endian
-            val codecId = dis.readInt()
-            val width   = dis.readInt()
-            val height  = dis.readInt()
+            // scrcpy 4.x video meta: header is codec_id(4) only, then the first
+            // packet is a "session-meta" packet — a 12-byte header with the MSB set
+            // carrying flags(4) + width(4) + height(4) and no payload.
+            val codecId       = dis.readInt()
+            val sessionFlags  = dis.readInt()
+            val width         = dis.readInt()
+            val height        = dis.readInt()
+            if (sessionFlags and (1 shl 31) == 0) {
+                Log.w(TAG, "Expected session-meta packet (MSB set) but got flags=0x${sessionFlags.toString(16)}")
+            }
             Log.i(TAG, "Device: $deviceName  codec=0x${codecId.toString(16)}  ${width}x${height}")
 
             // Read audio codec ID (first 4 bytes of audio socket)

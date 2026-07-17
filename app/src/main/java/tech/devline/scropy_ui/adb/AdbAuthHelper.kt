@@ -30,30 +30,49 @@ object AdbAuthHelper {
     fun getOrCreateKeys(context: Context): Pair<PrivateKey, ByteArray> {
         val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
         val privB64 = prefs.getString(K_PRIV, null)
-        val pubB64  = prefs.getString(K_PUB,  null)
 
-        if (privB64 != null && pubB64 != null) {
+        // Reuse the stored private key so existing pairings stay trusted, but always
+        // re-encode the public key with THIS device's name as the hostname, so the
+        // target's "Paired devices" list shows the device, not a fixed dev label.
+        val priv: PrivateKey? = privB64?.let {
             runCatching {
-                val privBytes = Base64.decode(privB64, Base64.DEFAULT)
-                val privKey   = KeyFactory.getInstance("RSA")
-                    .generatePrivate(java.security.spec.PKCS8EncodedKeySpec(privBytes))
-                val pubBytes  = Base64.decode(pubB64, Base64.DEFAULT)
-                return Pair(privKey, pubBytes)
-            }.onFailure { Log.w(TAG, "Stored keys invalid, regenerating", it) }
+                KeyFactory.getInstance("RSA")
+                    .generatePrivate(java.security.spec.PKCS8EncodedKeySpec(Base64.decode(it, Base64.DEFAULT)))
+            }.getOrNull()
+        }
+        if (priv != null) {
+            val adbPub = runCatching { encodePublicKey(publicFromPrivate(priv), adbHostname()) }
+                .getOrElse { Base64.decode(prefs.getString(K_PUB, "") ?: "", Base64.DEFAULT) }
+            return Pair(priv, adbPub)
         }
 
         Log.d(TAG, "Generating new ADB RSA key pair …")
         val kp  = KeyPairGenerator.getInstance("RSA").also { it.initialize(KEY_BITS) }.generateKeyPair()
-        val priv = kp.private
+        val newPriv = kp.private
         val pub  = kp.public as RSAPublicKey
-        val adbPub = encodePublicKey(pub, "rabi3@dev")
+        val adbPub = encodePublicKey(pub, adbHostname())
 
         prefs.edit()
-            .putString(K_PRIV, Base64.encodeToString(priv.encoded, Base64.DEFAULT))
+            .putString(K_PRIV, Base64.encodeToString(newPriv.encoded, Base64.DEFAULT))
             .putString(K_PUB,  Base64.encodeToString(adbPub, Base64.DEFAULT))
             .apply()
 
-        return Pair(priv, adbPub)
+        return Pair(newPriv, adbPub)
+    }
+
+    /** Reconstruct the RSA public key from a stored CRT private key. */
+    private fun publicFromPrivate(priv: PrivateKey): RSAPublicKey {
+        val crt = priv as java.security.interfaces.RSAPrivateCrtKey
+        val spec = java.security.spec.RSAPublicKeySpec(crt.modulus, crt.publicExponent)
+        return KeyFactory.getInstance("RSA").generatePublic(spec) as RSAPublicKey
+    }
+
+    /** adb public-key hostname comment — shown in the target's Paired-devices list. */
+    private fun adbHostname(): String {
+        val model = android.os.Build.MODEL
+            ?.replace(Regex("[^A-Za-z0-9._-]"), "-")
+            ?.takeIf { it.isNotBlank() } ?: "android"
+        return "scrcpy@$model"
     }
 
     /**
