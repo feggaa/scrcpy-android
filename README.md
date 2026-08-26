@@ -1,3 +1,5 @@
+
+
 # Scropy Android
 
 An Android-to-Android scrcpy client. Control and mirror any Android device from another Android device via ADB over WiFi or USB OTG — no PC required.
@@ -96,7 +98,7 @@ cd scrcpy-android
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Requires Android Studio Hedgehog or later, or Android SDK with build tools.
+Requires Android Studio Hedgehog or later, or Android SDK with build tools. If the app reports that `scrcpy-server` is not found in assets, run `./gradlew :server:assembleRelease` first.
 
 ---
 
