@@ -890,7 +890,7 @@ fun WifiConnectScreen(
             Spacer(Modifier.height(10.dp))
             OutlinedTextField(
                 value = adbPortStr, onValueChange = { adbPortStr = it.filter(Char::isDigit) },
-                label = { Text("ADB port (shown under Wireless debugging)") },
+                label = { Text("ADB port (5555 for adb tcpip, or Wireless debugging port)") },
                 placeholder = { Text("e.g. 38765") },
                 singleLine = true, modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
@@ -1120,7 +1120,10 @@ fun WifiConnectScreen(
                 Text("Device not paired yet", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "On device: Settings > Developer options > Wireless debugging\n> \"Pair device with pairing code\"",
+                    "Android 10 or older (or after `adb tcpip 5555`): no pairing needed — " +
+                    "use port 5555 and tap \"Allow\" on the device.\n\n" +
+                    "Android 11+ Wireless debugging: on device: Settings > Developer options > " +
+                    "Wireless debugging\n> \"Pair device with pairing code\"",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

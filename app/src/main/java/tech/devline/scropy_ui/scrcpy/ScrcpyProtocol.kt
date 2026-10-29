@@ -48,6 +48,7 @@ object ScrcpyProtocol {
 
     // ── Pointer IDs ───────────────────────────────────────────────────────────
     const val POINTER_MOUSE: Long = -1L    // 0xFFFFFFFFFFFFFFFF
+    const val POINTER_FINGER: Long = -2L   // generic finger (touchscreen source)
 
     // ─── Control message serialization ──────────────────────────────────────
 
@@ -78,7 +79,8 @@ object ScrcpyProtocol {
         x: Int, y: Int, screenW: Int, screenH: Int,
         hScroll: Float, vScroll: Float, buttons: Int = 0,
     ): ByteArray {
-        val buf = ByteBuffer.allocate(20).order(ByteOrder.BIG_ENDIAN)
+        // type(1) + position(12) + hscroll(2) + vscroll(2) + buttons(4)
+        val buf = ByteBuffer.allocate(21).order(ByteOrder.BIG_ENDIAN)
         buf.put(TYPE_INJECT_SCROLL_EVENT.toByte())
         buf.putInt(x); buf.putInt(y)
         buf.putShort(screenW.toShort()); buf.putShort(screenH.toShort())

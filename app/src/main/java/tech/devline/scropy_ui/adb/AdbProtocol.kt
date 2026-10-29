@@ -16,6 +16,7 @@ internal object AdbProtocol {
     const val A_OKAY = 0x59414B4F
     const val A_CLSE = 0x45534C43
     const val A_WRTE = 0x45545257
+    const val A_STLS = 0x534C5453
 
     // AUTH arg0 subtypes
     const val ADB_AUTH_TOKEN        = 1

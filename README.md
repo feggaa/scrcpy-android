@@ -16,12 +16,14 @@ An Android-to-Android scrcpy client. Control and mirror any Android device from 
 ## Features
 
 - **ADB over WiFi** — connect wirelessly using Android's Wireless Debugging (pairing code or direct IP)
+- **Classic `adb tcpip` (Android 10 and older)** — connects directly over plain TCP on port 5555, no pairing needed
 - **ADB over USB** — connect via USB OTG cable (no PC needed)
 - **Screen mirroring** — live stream the remote device's screen
 - **Shell terminal** — interactive ADB shell directly on the device
 - **Device list** — save and manage multiple devices with screenshots and metadata
 - **mDNS discovery** — auto-detect nearby devices advertising ADB over WiFi
 - **Device info** — shows model name and Android version per saved device
+- **Remote controls** — floating panel with Back/Home/Recents, power, wake, lock, swipe-to-unlock, volume, mute, media keys, screenshot, rotate, notification/quick-settings panels, text typing, and optional forwarding of your volume keys
 - **Self-connection** — connect the device to itself (great for Samsung DeX and desktop mode use cases)
 
 ---
@@ -49,6 +51,14 @@ An Android-to-Android scrcpy client. Control and mirror any Android device from 
 
 1. Go to **Settings → Developer Options → Wireless Debugging**
 2. Enable it and note the IP address and port shown
+
+#### Android 10 or older (no Wireless Debugging)
+
+1. Enable **USB debugging**, plug the device into a PC once and run `adb tcpip 5555`
+2. Unplug it, then connect from Scropy to `<device IP>` on port **5555** — no pairing needed
+3. Tap **Allow** (tick "Always allow") on the "Allow USB debugging?" prompt the first time
+
+The `adb tcpip` mode lasts until the device reboots.
 
 ### 2. Connect from Scropy
 

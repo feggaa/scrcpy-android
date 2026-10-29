@@ -4,6 +4,7 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
 import android.view.SurfaceHolder
@@ -17,6 +18,8 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -30,9 +33,13 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -43,6 +50,16 @@ import tech.devline.scropy_ui.scrcpy.ControlSender
 import tech.devline.scropy_ui.scrcpy.ScrcpySession
 import tech.devline.scropy_ui.scrcpy.VideoDecoder
 import tech.devline.scropy_ui.ui.theme.ScropyTheme
+
+/** Quick actions offered by the floating control panel. */
+enum class RemoteAction(val icon: String, val label: String) {
+    BACK("◀", "Back"), HOME("●", "Home"), RECENTS("▣", "Recents"), KEYBOARD("⌨", "Type"),
+    POWER("⏻", "Power"), WAKE("☀", "Wake"), LOCK("🔒", "Lock"), UNLOCK("🔓", "Unlock"),
+    VOLUME_DOWN("🔉", "Vol −"), VOLUME_UP("🔊", "Vol +"), MUTE("🔇", "Mute"), SCREENSHOT("📷", "Screenshot"),
+    MEDIA_PREVIOUS("⏮", "Prev"), MEDIA_PLAY_PAUSE("⏯", "Play"), MEDIA_NEXT("⏭", "Next"), ROTATE("⟳", "Rotate"),
+    NOTIFICATIONS("🔔", "Notifs"), QUICK_SETTINGS("⚙", "Quick set."), COLLAPSE_PANELS("⌃", "Close"),
+    BRIGHTNESS_UP("🔆", "Bright +"),
+}
 
 class StreamActivity : ComponentActivity() {
 
@@ -56,6 +73,9 @@ class StreamActivity : ComponentActivity() {
         // scrcpy's uncapped default without a visible hit for normal use.
         private const val DEFAULT_MAX_FPS = 30
         private const val DEFAULT_VIDEO_BIT_RATE = 4_000_000
+
+        private const val PREFS = "stream_settings"
+        private const val PREF_FORWARD_VOLUME_KEYS = "forward_volume_keys"
     }
 
     // ─── Session state ────────────────────────────────────────────────────────
@@ -73,12 +93,18 @@ class StreamActivity : ComponentActivity() {
 
     @Volatile private var surface: Surface? = null
 
+    // Control messages go out on one background thread: AdbStream writes can
+    // block on flow control, and key down/up must keep their order.
+    private val controlExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+
     // ─── UI state ─────────────────────────────────────────────────────────────
     private var statusText  = mutableStateOf("Connecting…")
     private var errorText   = mutableStateOf<String?>(null)
     private var isConnected = mutableStateOf(false)
     // Whether the remote device's physical screen is currently powered on.
     private var screenOn    = mutableStateOf(true)
+    // Route this phone's hardware volume keys to the remote device while streaming.
+    private var forwardVolumeKeys = mutableStateOf(true)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -106,6 +132,8 @@ class StreamActivity : ComponentActivity() {
         pendingHost = host
         pendingPort = port
         pendingUsbDevice = usbDevice
+        forwardVolumeKeys.value = getSharedPreferences(PREFS, MODE_PRIVATE)
+            .getBoolean(PREF_FORWARD_VOLUME_KEYS, true)
 
         setContent {
             ScropyTheme {
@@ -117,8 +145,18 @@ class StreamActivity : ComponentActivity() {
                     onToggleScreen = {
                         val newOn = !screenOn.value
                         screenOn.value = newOn
-                        controlSender?.sendDisplayPower(newOn)
+                        runControl { sendDisplayPower(newOn) }
                     },
+                    forwardVolumeKeys = forwardVolumeKeys.value,
+                    onToggleVolumeKeys = {
+                        val newValue = !forwardVolumeKeys.value
+                        forwardVolumeKeys.value = newValue
+                        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                            .putBoolean(PREF_FORWARD_VOLUME_KEYS, newValue).apply()
+                    },
+                    onAction   = ::onRemoteAction,
+                    onSendText = { text -> runControl { sendText(text) } },
+                    onSendKey  = { keycode -> runControl { pressKey(keycode) } },
                     onSurfaceReady      = { s ->
                         surface = s
                         if (isConnected.value) {
@@ -267,6 +305,52 @@ class StreamActivity : ComponentActivity() {
         }
     }
 
+    // ─── Remote control ───────────────────────────────────────────────────────
+
+    /** Run [block] against the current [ControlSender] on the control thread. */
+    private fun runControl(block: ControlSender.() -> Unit) {
+        val sender = controlSender ?: return
+        if (controlExecutor.isShutdown) return
+        controlExecutor.execute {
+            runCatching { sender.block() }
+                .onFailure { android.util.Log.w("StreamActivity", "Control action failed", it) }
+        }
+    }
+
+    private fun onRemoteAction(action: RemoteAction) = when (action) {
+        RemoteAction.BACK             -> runControl { sendBack() }
+        RemoteAction.HOME             -> runControl { sendHome() }
+        RemoteAction.RECENTS          -> runControl { sendRecents() }
+        RemoteAction.KEYBOARD         -> Unit   // handled by the UI (opens the text dialog)
+        RemoteAction.POWER            -> runControl { sendPower() }
+        RemoteAction.WAKE             -> runControl { sendWakeUp() }
+        RemoteAction.LOCK             -> runControl { sendLock() }
+        RemoteAction.UNLOCK           -> runControl { sendWakeAndSwipeUp() }
+        RemoteAction.VOLUME_DOWN      -> runControl { sendVolumeDown() }
+        RemoteAction.VOLUME_UP        -> runControl { sendVolumeUp() }
+        RemoteAction.MUTE             -> runControl { sendVolumeMute() }
+        RemoteAction.SCREENSHOT       -> runControl { sendScreenshot() }
+        RemoteAction.MEDIA_PREVIOUS   -> runControl { pressKey(KeyEvent.KEYCODE_MEDIA_PREVIOUS) }
+        RemoteAction.MEDIA_PLAY_PAUSE -> runControl { pressKey(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) }
+        RemoteAction.MEDIA_NEXT       -> runControl { pressKey(KeyEvent.KEYCODE_MEDIA_NEXT) }
+        RemoteAction.ROTATE           -> runControl { sendRotateDevice() }
+        RemoteAction.NOTIFICATIONS    -> runControl { sendExpandNotifications() }
+        RemoteAction.QUICK_SETTINGS   -> runControl { sendExpandSettings() }
+        RemoteAction.COLLAPSE_PANELS  -> runControl { sendCollapseNotifications() }
+        RemoteAction.BRIGHTNESS_UP    -> runControl { pressKey(KeyEvent.KEYCODE_BRIGHTNESS_UP) }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val isVolumeKey = event.keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+            event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
+        if (isVolumeKey && forwardVolumeKeys.value && isConnected.value && controlSender != null) {
+            val action = event.action; val code = event.keyCode; val repeat = event.repeatCount
+            runControl { sendKeyEvent(action, code, repeat) }
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     private fun disconnectAll() {
         decodeJob?.cancel()
         audioJob?.cancel()
@@ -307,6 +391,7 @@ class StreamActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         disconnectAll()
+        controlExecutor.shutdown()
     }
 }
 
@@ -319,6 +404,11 @@ private fun StreamScreen(
     isConnected: Boolean,
     screenOn: Boolean,
     onToggleScreen: () -> Unit,
+    forwardVolumeKeys: Boolean,
+    onToggleVolumeKeys: () -> Unit,
+    onAction: (RemoteAction) -> Unit,
+    onSendText: (String) -> Unit,
+    onSendKey: (Int) -> Unit,
     onSurfaceReady:     (Surface) -> Unit,
     onSurfaceDestroyed: () -> Unit,
     onTouchEvent:  (MotionEvent, Int, Int) -> Unit,
@@ -394,11 +484,24 @@ private fun StreamScreen(
 
         // ── Floating, draggable control puck when connected ─────────────────
         if (isConnected) {
+            var showKeyboard by remember { mutableStateOf(false) }
             FloatingControls(
-                screenOn       = screenOn,
-                onToggleScreen = onToggleScreen,
-                onDisconnect   = onDisconnect,
+                screenOn           = screenOn,
+                onToggleScreen     = onToggleScreen,
+                forwardVolumeKeys  = forwardVolumeKeys,
+                onToggleVolumeKeys = onToggleVolumeKeys,
+                onAction           = { action ->
+                    if (action == RemoteAction.KEYBOARD) showKeyboard = true else onAction(action)
+                },
+                onDisconnect       = onDisconnect,
             )
+            if (showKeyboard) {
+                TextInputDialog(
+                    onSendText = onSendText,
+                    onSendKey  = onSendKey,
+                    onDismiss  = { showKeyboard = false },
+                )
+            }
         }
     }
 }
@@ -412,6 +515,9 @@ private fun StreamScreen(
 private fun BoxScope.FloatingControls(
     screenOn: Boolean,
     onToggleScreen: () -> Unit,
+    forwardVolumeKeys: Boolean,
+    onToggleVolumeKeys: () -> Unit,
+    onAction: (RemoteAction) -> Unit,
     onDisconnect: () -> Unit,
 ) {
     val density = LocalDensity.current
@@ -461,42 +567,135 @@ private fun BoxScope.FloatingControls(
         }
     }
 
-    // ── The menu: one compact panel just below the puck, anchored separately so
-    //    only it moves — the puck stays exactly where you left it.
+    // ── The menu: one compact panel next to the puck, anchored separately so
+    //    only it moves — the puck stays exactly where you left it. It opens
+    //    downward from a puck in the top half and upward from one in the bottom.
     if (expanded) {
-        val menuY = offset.y + puckPx + gapPx
-        val menuModifier = if (onLeft) {
-            // Menu's left edge lines up with the puck's left edge, opening right
-            Modifier
-                .align(Alignment.TopStart)
-                .offset { IntOffset((screenW - puckPx + offset.x).roundToInt(), menuY.roundToInt()) }
-        } else {
-            // Menu's right edge lines up with the puck's right edge, opening left
-            Modifier
-                .align(Alignment.TopEnd)
-                .offset { IntOffset(offset.x.roundToInt(), menuY.roundToInt()) }
+        val onTop = offset.y + puckPx / 2f < screenH / 2f
+        val menuX = if (onLeft) (screenW - puckPx + offset.x) else offset.x
+        val menuY = if (onTop) offset.y + puckPx + gapPx else offset.y - gapPx - screenH
+        val maxMenuHeight = with(density) {
+            (if (onTop) screenH - (offset.y + puckPx + gapPx) - marginPx else offset.y - gapPx - marginPx)
+                .coerceAtLeast(puckPx * 3).toDp()
+        }
+        val alignment = when {
+            onTop && onLeft  -> Alignment.TopStart
+            onTop            -> Alignment.TopEnd
+            onLeft           -> Alignment.BottomStart
+            else             -> Alignment.BottomEnd
         }
         Surface(
             shape = RoundedCornerShape(14.dp),
-            color = Color.Black.copy(alpha = 0.72f),
+            color = Color.Black.copy(alpha = 0.78f),
             contentColor = Color.White,
-            modifier = menuModifier,
+            modifier = Modifier
+                .align(alignment)
+                .offset { IntOffset(menuX.roundToInt(), menuY.roundToInt()) }
+                .width(264.dp)
+                .heightIn(max = maxMenuHeight),
         ) {
-            Column {
-                MenuItem("Disconnect", onDisconnect)
-                MenuItem(if (screenOn) "Screen off" else "Screen on", onToggleScreen)
+            Column(
+                Modifier
+                    .verticalScroll(rememberScrollState())
+                    .padding(6.dp),
+            ) {
+                RemoteAction.entries.chunked(4).forEach { row ->
+                    Row {
+                        row.forEach { action ->
+                            ActionButton(action, Modifier.weight(1f)) { onAction(action) }
+                        }
+                        repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
+                    }
+                }
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 4.dp),
+                    color = Color.White.copy(alpha = 0.2f),
+                )
+                MenuItem(if (screenOn) "Screen off (keep streaming)" else "Screen on", onToggleScreen)
+                MenuItem(
+                    "Volume keys → device: " + if (forwardVolumeKeys) "On" else "Off",
+                    onToggleVolumeKeys,
+                )
+                MenuItem("Disconnect", onDisconnect, color = Color(0xFFFF8A80))
             }
         }
     }
 }
 
+/** One square icon + label button in the control grid. */
+@Composable
+private fun ActionButton(action: RemoteAction, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(10.dp),
+        color = Color.Transparent,
+        contentColor = Color.White,
+        modifier = modifier.padding(2.dp),
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(vertical = 6.dp),
+        ) {
+            Text(action.icon, fontSize = 20.sp)
+            Text(
+                action.label,
+                fontSize = 10.sp,
+                maxLines = 1,
+                textAlign = TextAlign.Center,
+                color = Color.White.copy(alpha = 0.8f),
+            )
+        }
+    }
+}
+
+/**
+ * Type text into whatever field is focused on the remote device, plus
+ * Backspace / Enter keys. Text is injected through scrcpy, which works best
+ * for characters the device's keyboard map knows (Latin letters, digits).
+ */
+@Composable
+private fun TextInputDialog(
+    onSendText: (String) -> Unit,
+    onSendKey: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var text by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Type on device") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    label = { Text("Text to send") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { onSendKey(KeyEvent.KEYCODE_DEL) }) { Text("⌫ Delete") }
+                    OutlinedButton(onClick = { onSendKey(KeyEvent.KEYCODE_ENTER) }) { Text("↵ Enter") }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { if (text.isNotEmpty()) { onSendText(text); text = "" } },
+                enabled = text.isNotEmpty(),
+            ) { Text("Send") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
 /** One row inside the floating menu panel. */
 @Composable
-private fun MenuItem(label: String, onClick: () -> Unit) {
+private fun MenuItem(label: String, onClick: () -> Unit, color: Color = Color.White) {
     Surface(
         onClick = onClick,
         color = Color.Transparent,
-        contentColor = Color.White,
+        contentColor = color,
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Text(
             label,

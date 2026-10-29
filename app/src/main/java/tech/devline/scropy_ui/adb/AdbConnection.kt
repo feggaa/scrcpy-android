@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * A full ADB connection over any transport (TLS or USB).
+ * A full ADB connection over any transport (plain TCP, TLS or USB).
  *
  * This class handles CNXN, AUTH and stream management over the given [AdbTransport].
  */
@@ -29,8 +29,13 @@ class AdbConnection private constructor(
         private const val TAG = "AdbConnection"
 
         /**
-         * Connect to the ADB daemon on [host]:[port] over TLS.
-         * The device must have been paired first (Pair tab).
+         * Connect to the ADB daemon on [host]:[port].
+         *
+         * Tries plain TCP first (Android 10 and older, or any device after
+         * `adb tcpip 5555`) — no pairing needed, the device just shows the
+         * "Allow USB debugging?" prompt the first time. If the daemon answers
+         * with STLS (Android 11+ Wireless debugging), reconnects over TLS,
+         * which requires the device to have been paired first.
          */
         suspend fun connectTcp(
             context: Context,
@@ -38,9 +43,48 @@ class AdbConnection private constructor(
             port: Int = 5555,
         ): AdbConnection = withContext(Dispatchers.IO) {
             val (priv, pub) = AdbAuthHelper.getOrCreateKeys(context)
+
+            val plain = AdbConnection(PlainTcpAdbTransport.open(host, port), priv, pub)
+            plain.sendCnxn()
+            plain.startReader()
+            try {
+                plain.waitConnected()
+            } catch (e: ClosedBeforeHandshakeException) {
+                plain.close()
+                if (plain.authSeen) {
+                    // A plain daemon that hung up mid-AUTH: the prompt was denied/dismissed
+                    throw IOException(
+                        "Device closed the connection during authorization — " +
+                        "tap \"Allow\" on the target device and try again", e)
+                }
+                // Some daemons drop a plain CNXN and expect TLS straight away
+                Log.i(TAG, "Peer closed plain connection — trying TLS")
+                return@withContext connectTls(host, port, priv, pub)
+            } catch (e: IOException) {
+                plain.close()
+                throw IOException(
+                    "ADB auth timed out — tap \"Allow\" on the target device " +
+                    "(tick \"Always allow\") and try again", e)
+            }
+            if (!plain.tlsRequested) {
+                Log.i(TAG, "Connected over plain TCP (legacy adb tcpip)")
+                return@withContext plain
+            }
+
+            Log.i(TAG, "Device requires TLS (Wireless debugging) — reconnecting over TLS")
+            plain.close()
+            connectTls(host, port, priv, pub)
+        }
+
+        private fun connectTls(
+            host: String,
+            port: Int,
+            priv: java.security.PrivateKey,
+            pub: ByteArray,
+        ): AdbConnection {
             val handle = AdbTlsSocket.connect(host, port, priv.encoded)
             val tlsTransport = TlsAdbTransport(handle)
-            AdbConnection(tlsTransport, priv, pub).also {
+            return AdbConnection(tlsTransport, priv, pub).also {
                 if (!tlsTransport.isStlsPath) {
                     // TLS-first: need to send CNXN over TLS
                     it.sendCnxn()
@@ -78,6 +122,12 @@ class AdbConnection private constructor(
     private val writeLock  = Any()  // guards send() so header+data are atomic
 
     private val connectedLatch = CountDownLatch(1)
+    /** Set when the daemon answered our plain CNXN with STLS (TLS required). */
+    @Volatile private var tlsRequested = false
+    /** Set once the daemon answered with CNXN or STLS. */
+    @Volatile private var handshakeDone = false
+    /** Set once the daemon sent any AUTH message (i.e. it speaks plain ADB). */
+    @Volatile private var authSeen = false
     private val signatureSent = AtomicBoolean(false)
     private val pubKeySent    = AtomicBoolean(false)
     private lateinit var readerThread: Thread
@@ -97,7 +147,12 @@ class AdbConnection private constructor(
     private fun waitConnected() {
         if (!connectedLatch.await(30, TimeUnit.SECONDS))
             throw IOException("ADB auth timed out (re-pair needed?)")
+        if (!handshakeDone) throw ClosedBeforeHandshakeException()
     }
+
+    /** The daemon closed the connection before answering CNXN with CNXN or STLS. */
+    private class ClosedBeforeHandshakeException :
+        IOException("Device closed the connection during the ADB handshake")
 
     // ─── Reader loop ────────────────────────────────────────────────────────
 
@@ -111,6 +166,7 @@ class AdbConnection private constructor(
             if (alive.get()) Log.e(TAG, "ADB read error", e)
         } finally {
             alive.set(false)
+            connectedLatch.countDown()   // don't leave waitConnected() hanging
             streams.values.forEach { it.onClose() }
         }
     }
@@ -128,10 +184,17 @@ class AdbConnection private constructor(
     }
 
     private fun dispatch(msg: AdbProtocol.Msg) {
+        if (msg.cmd == AdbProtocol.A_AUTH) authSeen = true
         when (msg.cmd) {
             // ── Connection / auth ────────────────────────────────────────
             AdbProtocol.A_CNXN -> {
                 Log.i(TAG, "ADB connected: ${String(msg.data)}")
+                handshakeDone = true
+                connectedLatch.countDown()
+            }
+            AdbProtocol.A_STLS -> {
+                tlsRequested = true
+                handshakeDone = true
                 connectedLatch.countDown()
             }
             AdbProtocol.A_AUTH -> when (msg.arg0) {
